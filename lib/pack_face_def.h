@@ -437,13 +437,21 @@ static __device__ __forceinline__ void coordsFromIndex3D(int &idx, Int &X, Int &
   int x, y, z, t;
 
   if (idxType == EVEN_X) { // X even
+#ifdef SHARED_WILSON_DSLASH
     int xt = blockIdx.x*blockDim.x + threadIdx.x;
     int aux = xt+xt;
     t = aux / LX;
     x = aux - t*LX;
     y = blockIdx.y*blockDim.y + threadIdx.y;
     z = blockIdx.z*blockDim.z + threadIdx.z;
-    x += (parity + t + z + y) &1;
+#else
+    x = 2*(blockIdx.x*blockDim.x + threadIdx.x);
+    y = blockIdx.y*blockDim.y + threadIdx.y;
+    int zt = blockIdx.z*blockDim.z + threadIdx.z;
+    t = zt / LZ;
+    z = zt - t*LZ;
+#endif
+    x += (parity + t + z + y) & 1;
     idx = ((t*LZ + z)*LY + y)*LX + x;
     cb_idx = idx >> 1; 
   } else {

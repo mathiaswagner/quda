@@ -189,6 +189,7 @@ namespace quda {
   // Enable shared memory dslash for Fermi architecture
   //#define SHARED_WILSON_DSLASH
   //#define SHARED_8_BYTE_WORD_SIZE // 8-byte shared memory access
+#define SPATIAL_WILSON_DSLASH
 
 #include <pack_face_def.h>        // kernels for packing the ghost zones and general indexing
 #include <staggered_dslash_def.h> // staggered Dslash kernels
@@ -532,14 +533,18 @@ namespace quda {
   /** This derived class is specifically for driving the Dslash kernels
       that use shared memory blocking.  This only applies on Fermi and
       upwards, and only for the interior kernels. */
-#if (__COMPUTE_CAPABILITY__ >= 200 && defined(SHARED_WILSON_DSLASH)) 
+#if __COMPUTE_CAPABILITY__ >= 200 && (defined(SHARED_WILSON_DSLASH) || defined(SPATIAL_WILSON_DSLASH)) 
   class SharedDslashCuda : public DslashCuda {
   protected:
     int sharedBytesPerBlock(const TuneParam &param) const { return 0; } // FIXME: this isn't quite true, but works
     bool advanceSharedBytes(TuneParam &param) const { 
+#ifdef SHARED_WILSON_DSLASH // FIXME - shared memory tuning only supported on exterior kernels
       if (dslashParam.kernel_type != INTERIOR_KERNEL) return DslashCuda::advanceSharedBytes(param);
       else return false;
-    } // FIXME - shared memory tuning only supported on exterior kernels
+#else // SPATIAL_WILSON_DSLASH
+      return DslashCuda::advanceSharedBytes(param);
+#endif
+    } 
 
     /** Helper function to set the shared memory size from the 3-d block size */
     int sharedBytes(const dim3 &block) const { 
@@ -551,17 +556,27 @@ namespace quda {
 
     /** Helper function to set the 3-d grid size from the 3-d block size */
     dim3 createGrid(const dim3 &block) const {
+#ifdef SHARED_WILSON_DSLASH
       unsigned int gx = ((dslashConstants.x[0]/2)*dslashConstants.x[3] + block.x - 1) / block.x;
       unsigned int gy = (dslashConstants.x[1] + block.y - 1 ) / block.y;	
       unsigned int gz = (dslashConstants.x[2] + block.z - 1) / block.z;
+#else
+      unsigned int gx = (dslashConstants.x[0]/2 + block.x - 1 ) / block.x;
+      unsigned int gy = (dslashConstants.x[1]   + block.y - 1 ) / block.y;	
+      unsigned int gz = (dslashConstants.x[2]*dslashConstants.x[3] + block.z - 1) / block.z;
+#endif
       return dim3(gx, gy, gz);
     }
 
     /** Advance the 3-d block size. */
     bool advanceBlockDim(TuneParam &param) const {
       if (dslashParam.kernel_type != INTERIOR_KERNEL) return DslashCuda::advanceBlockDim(param);
-      const unsigned int min_threads = 2;
+      const unsigned int min_threads = 16;
+#ifdef SHARED_WILSON_DSLASH
       const unsigned int max_threads = 512; // FIXME: use deviceProp.maxThreadsDim[0];
+#else
+      const unsigned int max_threads = 1024; // FIXME: use deviceProp.maxThreadsDim[0];
+#endif
       const unsigned int max_shared = 16384*3; // FIXME: use deviceProp.sharedMemPerBlock;
     
       // set the x-block dimension equal to the entire x dimension
@@ -569,23 +584,24 @@ namespace quda {
       dim3 blockInit = param.block;
       blockInit.z++;
       for (unsigned bx=blockInit.x; bx<=dslashConstants.x[0]/2; bx++) {
-	//unsigned int gx = (dslashConstants.x[0]*dslashConstants.x[3] + bx - 1) / bx;
-	for (unsigned by=blockInit.y; by<=dslashConstants.x[1]; by++) {
+	unsigned int gx = (dslashConstants.x[0]*dslashConstants.x[3] + bx - 1) / bx;
+	for (unsigned by=blockInit.y; by<=dslashConstants.x[1]/2; by++) {
 	  unsigned int gy = (dslashConstants.x[1] + by - 1 ) / by;	
 	
-	  if (by > 1 && (by%2) != 0) continue; // can't handle odd blocks yet except by=1
-	
-	  for (unsigned bz=blockInit.z; bz<=dslashConstants.x[2]; bz++) {
+	  for (unsigned bz=blockInit.z; bz<=dslashConstants.x[2]/2; bz++) {
 	    unsigned int gz = (dslashConstants.x[2] + bz - 1) / bz;
 	  
-	    if (bz > 1 && (bz%2) != 0) continue; // can't handle odd blocks yet except bz=1
 	    if (bx*by*bz > max_threads) continue;
-	    if (bx*by*bz < min_threads) continue;
+	    if ((bx%2) != 0) continue; // can't handle odd blocks yet except by=1
+	    if (by > 1 && (by%2) != 0) continue; // can't handle odd blocks yet except by=1
+	    if (bz > 1 && (bz%2) != 0) continue; // can't handle odd blocks yet except bz=1
+#ifdef SHARED_WILSON_DSLASH
 	    // can't yet handle the last block properly in shared memory addressing
 	    if (by*gy != dslashConstants.x[1]) continue;
 	    if (bz*gz != dslashConstants.x[2]) continue;
+#endif
+	    if (bx*by*bz < min_threads) continue;
 	    if (sharedBytes(dim3(bx, by, bz)) > max_shared) continue;
-
 	    param.block = dim3(bx, by, bz);	  
 	    set = true; break;
 	  }
@@ -596,14 +612,19 @@ namespace quda {
 	blockInit.y = 1;
       }
 
-      if (param.block.x > dslashConstants.x[0]/2 && param.block.y > dslashConstants.x[1] &&
-	  param.block.z > dslashConstants.x[2] || !set) {
-	//||sharedBytesPerThread()*param.block.x > max_shared) {
+      if (param.block.x > dslashConstants.x[0]/2 && param.block.y > dslashConstants.x[1] 
+	  && param.block.z > dslashConstants.x[2] || !set) {
+#ifdef SHARED_WILSON_DSLASH
 	param.block = dim3(dslashConstants.x[0]/2, 1, 1);
+#else
+	param.block = dim3(1, 1, 1);
+#endif
 	return false;
       } else { 
 	param.grid = createGrid(param.block);
+#ifdef SHARED_WILSON_DSLASH
 	param.shared_bytes = sharedBytes(param.block);
+#endif
 	return true; 
       }
     
@@ -626,7 +647,11 @@ namespace quda {
     {
       if (dslashParam.kernel_type != INTERIOR_KERNEL) return DslashCuda::initTuneParam(param);
 
+#ifdef SHARED_WILSON_DSLASH
       param.block = dim3(dslashConstants.x[0]/2, 1, 1);
+#else
+      param.block = dim3(1, 1, 1);
+#endif
       param.grid = createGrid(param.block);
       param.shared_bytes = sharedBytes(param.block);
     }

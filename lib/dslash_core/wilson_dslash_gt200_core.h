@@ -397,8 +397,17 @@ if (kernel_type == INTERIOR_KERNEL) {
   sid = blockIdx.x*blockDim.x + threadIdx.x;
   if (sid >= param.threads) return;
 
-  // Inline by hand for the moment and assume even dimensions
+#ifdef SPATIAL_WILSON_DSLASH
+  coordsFromIndex3D<EVEN_X>(X, x1, x2, x3, x4, sid, param.parity);
+
+  // only need to check Y and Z dims currently since X and T set to match exactly
+  if (x1 >= X1) return;
+  if (x2 >= X2) return;
+  if (x3 >= X3) return;
+  if (x4 >= X4) return;
+#else
   coordsFromIndex<EVEN_X>(X, x1, x2, x3, x4, sid, param.parity);
+#endif
 
   o00_re = 0;  o00_im = 0;
   o01_re = 0;  o01_im = 0;
